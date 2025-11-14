@@ -14,7 +14,7 @@ pipeline {
             }
         }
         
-        stage('Setup Snyk') {
+    /*    stage('Setup Snyk') {
             steps {
                 sh '''
                     # Check if Snyk is installed
@@ -32,7 +32,18 @@ pipeline {
                 '''
             }
         }
-        
+      */  
+      stage('Setup Snyk') {
+            steps {
+                sh '''
+                    echo "Installing Snyk CLI..."
+                    curl -Lo snyk https://static.snyk.io/cli/latest/snyk-linux
+                    chmod +x snyk
+                    mv snyk /usr/local/bin/snyk
+                '''
+            }
+        }
+
         stage('Build Docker Image') {
             steps {
                 sh '''
