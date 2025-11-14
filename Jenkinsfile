@@ -47,6 +47,21 @@ pipeline {
             }
         }
 */
+
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                    # Check if npm exists, install if not
+                    if ! command -v npm &> /dev/null; then
+                        curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+                        apt-get install -y nodejs
+                    fi
+                    npm install -g snyk
+                    snyk auth ${SNYK_TOKEN}
+                '''
+            }
+        }
+
         stage('Setup Snyk') {
             steps {
                 sh '''
