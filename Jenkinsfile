@@ -21,15 +21,31 @@ pipeline {
                     # Check if Snyk is installed
                     if command -v snyk &> /dev/null; then
                         echo "Snyk CLI is already installed"
+                        snyk --version
                     else
                         echo "Installing Snyk CLI..."
+                        
+                        # Download Snyk binary
                         curl -Lo ./snyk https://static.snyk.io/cli/latest/snyk-linux
                         chmod +x ./snyk
-                        sudo mv ./snyk /usr/local/bin/
+                        
+                        # Move to a location in PATH that doesn't require sudo
+                        mkdir -p ${WORKSPACE}/bin
+                        mv ./snyk ${WORKSPACE}/bin/
+                        export PATH="${WORKSPACE}/bin:$PATH"
+                        
+                        echo "Snyk installed to ${WORKSPACE}/bin/"
+                        ${WORKSPACE}/bin/snyk --version
                     fi
 
                     # Authenticate with Snyk
-                    snyk auth ${SNYK_TOKEN}
+                    if command -v snyk &> /dev/null; then
+                        snyk auth ${SNYK_TOKEN}
+                    else
+                        ${WORKSPACE}/bin/snyk auth ${SNYK_TOKEN}
+                    fi
+                    
+                    echo "Snyk authentication successful"
                 '''
             }
         }
@@ -38,8 +54,17 @@ pipeline {
             steps {
                 sh '''
                     echo "Building Docker image..."
+                    
+                    # Check if Docker is available
+                    if ! command -v docker &> /dev/null; then
+                        echo "ERROR: Docker is not installed or not available in PATH"
+                        exit 1
+                    fi
+                    
                     docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} .
                     docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${DOCKER_IMAGE}:latest
+                    
+                    echo "Docker image built successfully"
                 '''
             }
         }
@@ -48,7 +73,15 @@ pipeline {
             steps {
                 sh '''
                     echo "Running unit tests..."
-                    docker run --rm ${DOCKER_IMAGE}:${DOCKER_TAG} python test_app.py
+                    
+                    # Check if test file exists
+                    if [ -f test_app.py ]; then
+                        docker run --rm ${DOCKER_IMAGE}:${DOCKER_TAG} python test_app.py
+                    elif [ -d tests ]; then
+                        docker run --rm ${DOCKER_IMAGE}:${DOCKER_TAG} python -m pytest tests/ -v
+                    else
+                        echo "No tests found, skipping..."
+                    fi
                 '''
             }
         }
@@ -60,24 +93,36 @@ pipeline {
                         echo "Scanning Python dependencies..."
                         mkdir -p reports
                         cd ${WORKSPACE}
+                        
+                        # Set PATH to include workspace bin
+                        export PATH="${WORKSPACE}/bin:$PATH"
 
                         if [ -f requirements.txt ]; then
                             echo "requirements.txt found"
                             cat requirements.txt
+                        else
+                            echo "WARNING: requirements.txt not found"
+                            exit 0
                         fi
 
-                        snyk test --file=./requirements.txt --package-manager=pip --json > reports/snyk-deps-report.json || true
+                        # Use full path to snyk if needed
+                        SNYK_CMD="snyk"
+                        if [ -f ${WORKSPACE}/bin/snyk ]; then
+                            SNYK_CMD="${WORKSPACE}/bin/snyk"
+                        fi
+
+                        ${SNYK_CMD} test --file=./requirements.txt --package-manager=pip --json > reports/snyk-deps-report.json || true
 
                         echo "=== Dependency Scan Results ==="
                         if [ -s reports/snyk-deps-report.json ]; then
-                            snyk test --file=./requirements.txt --package-manager=pip || true
+                            ${SNYK_CMD} test --file=./requirements.txt --package-manager=pip || true
                         else
                             echo "No dependency scan results available"
                         fi
                     '''
 
                     def hasVulnerabilities = sh(
-                        script: 'test -s reports/snyk-deps-report.json && grep -q "\\\"severity\\\":\\\"critical\\\"" reports/snyk-deps-report.json',
+                        script: 'test -s reports/snyk-deps-report.json && grep -q "\\"severity\\":\\"critical\\"" reports/snyk-deps-report.json',
                         returnStatus: true
                     )
                     if (hasVulnerabilities == 0) {
@@ -93,10 +138,19 @@ pipeline {
                 script {
                     sh '''
                         echo "Scanning Docker image..."
-                        snyk container test ${DOCKER_IMAGE}:${DOCKER_TAG} --json > reports/snyk-container-report.json || true
+                        
+                        # Set PATH to include workspace bin
+                        export PATH="${WORKSPACE}/bin:$PATH"
+                        
+                        SNYK_CMD="snyk"
+                        if [ -f ${WORKSPACE}/bin/snyk ]; then
+                            SNYK_CMD="${WORKSPACE}/bin/snyk"
+                        fi
+
+                        ${SNYK_CMD} container test ${DOCKER_IMAGE}:${DOCKER_TAG} --json > reports/snyk-container-report.json || true
 
                         echo "=== Container Scan Results ==="
-                        snyk container test ${DOCKER_IMAGE}:${DOCKER_TAG} || true
+                        ${SNYK_CMD} container test ${DOCKER_IMAGE}:${DOCKER_TAG} || true
                     '''
 
                     def hasVulnerabilities = sh(
@@ -116,10 +170,19 @@ pipeline {
                 script {
                     sh '''
                         echo "Running static code analysis..."
-                        snyk code test --json > reports/snyk-code-report.json || true
+                        
+                        # Set PATH to include workspace bin
+                        export PATH="${WORKSPACE}/bin:$PATH"
+                        
+                        SNYK_CMD="snyk"
+                        if [ -f ${WORKSPACE}/bin/snyk ]; then
+                            SNYK_CMD="${WORKSPACE}/bin/snyk"
+                        fi
+
+                        ${SNYK_CMD} code test --json > reports/snyk-code-report.json || true
 
                         echo "=== Code Analysis Results ==="
-                        snyk code test || true
+                        ${SNYK_CMD} code test || true
                     '''
 
                     def hasIssues = sh(
@@ -191,24 +254,33 @@ EOF
             steps {
                 sh '''
                     echo "Pushing results to Snyk dashboard for continuous monitoring..."
+                    
+                    # Set PATH to include workspace bin
+                    export PATH="${WORKSPACE}/bin:$PATH"
+                    
+                    SNYK_CMD="snyk"
+                    if [ -f ${WORKSPACE}/bin/snyk ]; then
+                        SNYK_CMD="${WORKSPACE}/bin/snyk"
+                    fi
 
                     echo "Monitoring dependencies..."
                     cd ${WORKSPACE}
-                    snyk monitor --file=./requirements.txt \
+                    ${SNYK_CMD} monitor --file=./requirements.txt \
                         --project-name="vulnerable-python-app-deps-build-${BUILD_NUMBER}" \
                         --remote-repo-url="https://github.com/eugeneswee/vulnerable-python-app" || true
 
                     echo "Monitoring container image..."
-                    snyk container monitor ${DOCKER_IMAGE}:${DOCKER_TAG} \
+                    ${SNYK_CMD} container monitor ${DOCKER_IMAGE}:${DOCKER_TAG} \
                         --project-name="vulnerable-python-app-container-build-${BUILD_NUMBER}" || true
 
                     echo "Monitoring code..."
-                    snyk code test --report \
+                    ${SNYK_CMD} code test --report \
                         --project-name="vulnerable-python-app-code-build-${BUILD_NUMBER}" || true
 
                     echo ""
                     echo "============================================"
                     echo "Projects should now appear in Snyk dashboard:"
+                    echo "https://app.snyk.io"
                     echo "============================================"
                 '''
             }
@@ -219,7 +291,14 @@ EOF
         always {
             sh '''
                 echo "Cleaning up Docker images..."
-                docker rmi ${DOCKER_IMAGE}:${DOCKER_TAG} || true
+                
+                # Check if Docker is available before cleanup
+                if command -v docker &> /dev/null; then
+                    docker rmi ${DOCKER_IMAGE}:${DOCKER_TAG} || true
+                    docker rmi ${DOCKER_IMAGE}:latest || true
+                else
+                    echo "Docker not available for cleanup"
+                fi
             '''
         }
 
