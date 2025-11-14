@@ -9,6 +9,30 @@ pipeline {
 
     stages {
 
+        stage('Setup Snyk') {
+            steps {
+                sh '''
+                    # Install Snyk CLI
+                    npm install -g snyk
+                    # Verify installation
+                    snyk --version
+                    snyk auth ${SNYK_TOKEN}
+                '''
+            }
+        }
+
+        stage('Setup Docker') {
+            steps {
+                sh '''
+                    # For Linux agents, install Docker CLI if missing
+                    apt-get update
+                    apt-get install -y docker.io
+                    # Or for Alpine: apk add docker
+                '''
+            }
+        }
+
+
         stage('Checkout') {
             steps {
                 checkout scm
