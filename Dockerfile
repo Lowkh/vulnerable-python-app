@@ -1,15 +1,19 @@
-FROM python:3.8-slim
+FROM python:3.11-slim
+
+# Set working directory
 WORKDIR /app
-# Copy requirements first for better layer caching
+
+# Copy requirements first for better caching
 COPY requirements.txt .
+
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
+
 # Copy application code
-COPY app.py .
-COPY test_app.py .
-# Create a non-root user (we'll improve this in remediation)
-RUN useradd -m appuser
-# Expose port
+COPY . .
+
+# Expose application port
 EXPOSE 5000
-# Run the application (running as root for now - vulnerability!)
+
+# Run the application
 CMD ["python", "app.py"]

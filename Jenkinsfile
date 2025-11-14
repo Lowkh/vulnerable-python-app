@@ -1,130 +1,93 @@
 pipeline {
     agent any
-
+    
     environment {
-        SNYK_TOKEN   = credentials('snyk-token')
+        SNYK_TOKEN = credentials('snyk-token')
         DOCKER_IMAGE = 'vulnerable-python-app'
-        DOCKER_TAG   = "${BUILD_NUMBER}"
+        DOCKER_TAG = "${BUILD_NUMBER}"
     }
-
+    
     stages {
-
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
-
+        
         stage('Setup Snyk') {
             steps {
                 sh '''
                     # Check if Snyk is installed
-                    if command -v snyk &> /dev/null; then
-                        echo "Snyk CLI is already installed"
-                        snyk --version
-                    else
+                    if ! command -v snyk &> /dev/null; then
                         echo "Installing Snyk CLI..."
-                        
-                        # Download Snyk binary
-                        curl -Lo ./snyk https://static.snyk.io/cli/latest/snyk-linux
-                        chmod +x ./snyk
-                        
-                        # Move to a location in PATH that doesn't require sudo
-                        mkdir -p ${WORKSPACE}/bin
-                        mv ./snyk ${WORKSPACE}/bin/
-                        export PATH="${WORKSPACE}/bin:$PATH"
-                        
-                        echo "Snyk installed to ${WORKSPACE}/bin/"
-                        ${WORKSPACE}/bin/snyk --version
-                    fi
-
-                    # Authenticate with Snyk
-                    if command -v snyk &> /dev/null; then
-                        snyk auth ${SNYK_TOKEN}
+                        curl -Lo .snyk https://static.snyk.io/cli/latest/snyk-linux
+                        chmod +x .snyk
+                        sudo mv .snyk /usr/local/bin/
                     else
-                        ${WORKSPACE}/bin/snyk auth ${SNYK_TOKEN}
+                        echo "Snyk CLI is already installed"
                     fi
                     
-                    echo "Snyk authentication successful"
+                    # Authenticate with Snyk
+                    snyk auth $SNYK_TOKEN
                 '''
             }
         }
-
+        
         stage('Build Docker Image') {
             steps {
                 sh '''
                     echo "Building Docker image..."
-                    
-                    # Check if Docker is available
-                    if ! command -v docker &> /dev/null; then
-                        echo "ERROR: Docker is not installed or not available in PATH"
-                        exit 1
-                    fi
-                    
-                    docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} .
-                    docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${DOCKER_IMAGE}:latest
-                    
-                    echo "Docker image built successfully"
+                    docker build -t $DOCKER_IMAGE:$DOCKER_TAG .
+                    docker tag $DOCKER_IMAGE:$DOCKER_TAG $DOCKER_IMAGE:latest
                 '''
             }
         }
-
+        
         stage('Run Unit Tests') {
             steps {
                 sh '''
                     echo "Running unit tests..."
-                    
-                    # Check if test file exists
-                    if [ -f test_app.py ]; then
-                        docker run --rm ${DOCKER_IMAGE}:${DOCKER_TAG} python test_app.py
-                    elif [ -d tests ]; then
-                        docker run --rm ${DOCKER_IMAGE}:${DOCKER_TAG} python -m pytest tests/ -v
-                    else
-                        echo "No tests found, skipping..."
-                    fi
+                    docker run --rm $DOCKER_IMAGE:$DOCKER_TAG python test_app.py
                 '''
             }
         }
-
+        
         stage('Snyk Security Scan - Dependencies') {
             steps {
                 script {
                     sh '''
                         echo "Scanning Python dependencies..."
-                        mkdir -p reports
-                        cd ${WORKSPACE}
                         
-                        # Set PATH to include workspace bin
-                        export PATH="${WORKSPACE}/bin:$PATH"
-
+                        # Create reports directory
+                        mkdir -p reports
+                        
+                        # Test Python dependencies with proper context
+                        cd $WORKSPACE
+                        
+                        # First, let's test if Snyk can access the file
                         if [ -f requirements.txt ]; then
                             echo "requirements.txt found"
                             cat requirements.txt
-                        else
-                            echo "WARNING: requirements.txt not found"
-                            exit 0
                         fi
-
-                        # Use full path to snyk if needed
-                        SNYK_CMD="snyk"
-                        if [ -f ${WORKSPACE}/bin/snyk ]; then
-                            SNYK_CMD="${WORKSPACE}/bin/snyk"
-                        fi
-
-                        ${SNYK_CMD} test --file=./requirements.txt --package-manager=pip --json > reports/snyk-deps-report.json || true
-
-                        echo "=== Dependency Scan Results ==="
+                        
+                        # Run Snyk test with explicit path and Python flag
+                        snyk test --file=./requirements.txt --package-manager=pip --json > reports/snyk-deps-report.json || true
+                        
+                        # Display summary (this may fail but that's ok)
+                        echo "Dependency Scan Results:"
                         if [ -s reports/snyk-deps-report.json ]; then
-                            ${SNYK_CMD} test --file=./requirements.txt --package-manager=pip || true
+                            snyk test --file=./requirements.txt --package-manager=pip || true
                         else
                             echo "No dependency scan results available"
                         fi
                     '''
-
+                    
+                    // Check if critical vulnerabilities exist
                     def hasVulnerabilities = sh(
-                        script: 'test -s reports/snyk-deps-report.json && grep -q "\\"severity\\":\\"critical\\"" reports/snyk-deps-report.json',
+                        script: 'test -s reports/snyk-deps-report.json && grep -q "severity.*critical" reports/snyk-deps-report.json',
                         returnStatus: true
                     )
+                    
                     if (hasVulnerabilities == 0) {
                         currentBuild.result = 'UNSTABLE'
                         echo "WARNING: Critical vulnerabilities found in dependencies"
@@ -132,31 +95,27 @@ pipeline {
                 }
             }
         }
-
+        
         stage('Snyk Security Scan - Docker Image') {
             steps {
                 script {
                     sh '''
                         echo "Scanning Docker image..."
                         
-                        # Set PATH to include workspace bin
-                        export PATH="${WORKSPACE}/bin:$PATH"
+                        # Scan container and save results
+                        snyk container test $DOCKER_IMAGE:$DOCKER_TAG --json > reports/snyk-container-report.json || true
                         
-                        SNYK_CMD="snyk"
-                        if [ -f ${WORKSPACE}/bin/snyk ]; then
-                            SNYK_CMD="${WORKSPACE}/bin/snyk"
-                        fi
-
-                        ${SNYK_CMD} container test ${DOCKER_IMAGE}:${DOCKER_TAG} --json > reports/snyk-container-report.json || true
-
-                        echo "=== Container Scan Results ==="
-                        ${SNYK_CMD} container test ${DOCKER_IMAGE}:${DOCKER_TAG} || true
+                        # Display summary
+                        echo "Container Scan Results:"
+                        snyk container test $DOCKER_IMAGE:$DOCKER_TAG || true
                     '''
-
+                    
+                    // Mark build as unstable if vulnerabilities found
                     def hasVulnerabilities = sh(
                         script: 'test -s reports/snyk-container-report.json && grep -q "vulnerabilities" reports/snyk-container-report.json',
                         returnStatus: true
                     )
+                    
                     if (hasVulnerabilities == 0) {
                         currentBuild.result = 'UNSTABLE'
                         echo "WARNING: Vulnerabilities found in container image"
@@ -164,84 +123,85 @@ pipeline {
                 }
             }
         }
-
+        
         stage('Snyk Code Analysis') {
             steps {
                 script {
                     sh '''
                         echo "Running static code analysis..."
                         
-                        # Set PATH to include workspace bin
-                        export PATH="${WORKSPACE}/bin:$PATH"
+                        # Run code analysis
+                        snyk code test --json > reports/snyk-code-report.json || true
                         
-                        SNYK_CMD="snyk"
-                        if [ -f ${WORKSPACE}/bin/snyk ]; then
-                            SNYK_CMD="${WORKSPACE}/bin/snyk"
-                        fi
-
-                        ${SNYK_CMD} code test --json > reports/snyk-code-report.json || true
-
-                        echo "=== Code Analysis Results ==="
-                        ${SNYK_CMD} code test || true
+                        # Display summary
+                        echo "Code Analysis Results:"
+                        snyk code test || true
                     '''
-
+                    
+                    // Check for code issues
                     def hasIssues = sh(
                         script: 'test -s reports/snyk-code-report.json',
                         returnStatus: true
                     )
+                    
                     if (hasIssues == 0) {
                         echo "Code quality issues detected"
                     }
                 }
             }
         }
-
+        
         stage('Generate Security Report') {
             steps {
                 sh '''
                     echo "Generating consolidated security report..."
-                    mkdir -p reports
-
+                    
+                    # Create summary report
                     cat > reports/security-summary.txt << EOF
-=== Security Scan Summary ===
-Build Number: ${BUILD_NUMBER}
+Security Scan Summary
+=====================
+Build Number: $BUILD_NUMBER
 Date: $(date)
-Image: ${DOCKER_IMAGE}:${DOCKER_TAG}
+Image: $DOCKER_IMAGE:$DOCKER_TAG
+
 EOF
-
-                    # Dependency vulnerabilities
+                    
+                    # Add dependency vulnerabilities count
                     if [ -f reports/snyk-deps-report.json ]; then
-                        echo "## Dependency Vulnerabilities:" >> reports/security-summary.txt
-                        echo "Total: $(grep -o '"severity"' reports/snyk-deps-report.json | wc -l)" >> reports/security-summary.txt
-                        echo "Critical: $(grep -o '"severity":"critical"' reports/snyk-deps-report.json | wc -l)" >> reports/security-summary.txt
-                        echo "High: $(grep -o '"severity":"high"' reports/snyk-deps-report.json | wc -l)" >> reports/security-summary.txt
-                        echo "Medium: $(grep -o '"severity":"medium"' reports/snyk-deps-report.json | wc -l)" >> reports/security-summary.txt
-                        echo "Low: $(grep -o '"severity":"low"' reports/snyk-deps-report.json | wc -l)" >> reports/security-summary.txt
+                        echo "Dependency Vulnerabilities:" >> reports/security-summary.txt
+                        echo "  Total: $(grep -o "severity" reports/snyk-deps-report.json | wc -l)" >> reports/security-summary.txt
+                        echo "  Critical: $(grep -o "severity.*critical" reports/snyk-deps-report.json | wc -l)" >> reports/security-summary.txt
+                        echo "  High: $(grep -o "severity.*high" reports/snyk-deps-report.json | wc -l)" >> reports/security-summary.txt
+                        echo "  Medium: $(grep -o "severity.*medium" reports/snyk-deps-report.json | wc -l)" >> reports/security-summary.txt
+                        echo "  Low: $(grep -o "severity.*low" reports/snyk-deps-report.json | wc -l)" >> reports/security-summary.txt
                         echo "" >> reports/security-summary.txt
                     fi
-
-                    # Container vulnerabilities
+                    
+                    # Add container vulnerabilities count
                     if [ -f reports/snyk-container-report.json ]; then
-                        echo "## Container Vulnerabilities:" >> reports/security-summary.txt
-                        echo "Total: $(grep -o '"severity"' reports/snyk-container-report.json | wc -l)" >> reports/security-summary.txt
+                        echo "Container Vulnerabilities:" >> reports/security-summary.txt
+                        echo "  Total: $(grep -o "severity" reports/snyk-container-report.json | wc -l)" >> reports/security-summary.txt
                         echo "" >> reports/security-summary.txt
                     fi
-
-                    # Code issues
+                    
+                    # Add code issues count
                     if [ -f reports/snyk-code-report.json ]; then
-                        echo "## Code Issues:" >> reports/security-summary.txt
-                        echo "Total: $(grep -o '"issue"' reports/snyk-code-report.json | wc -l)" >> reports/security-summary.txt
+                        echo "Code Issues:" >> reports/security-summary.txt
+                        echo "  Total: $(grep -o "issue" reports/snyk-code-report.json | wc -l)" >> reports/security-summary.txt
                         echo "" >> reports/security-summary.txt
                     fi
-
+                    
+                    # Display the summary
                     cat reports/security-summary.txt
                 '''
             }
         }
-
+        
         stage('Archive Reports') {
             steps {
-                archiveArtifacts artifacts: 'reports/**/*', allowEmptyArchive: true
+                archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
+                
+                // Publish HTML reports if HTML Publisher plugin is installed
                 script {
                     if (fileExists('reports/security-summary.txt')) {
                         echo "Security reports have been archived"
@@ -249,70 +209,51 @@ EOF
                 }
             }
         }
-
+        
         stage('Snyk Monitor - Push to Dashboard') {
             steps {
                 sh '''
                     echo "Pushing results to Snyk dashboard for continuous monitoring..."
                     
-                    # Set PATH to include workspace bin
-                    export PATH="${WORKSPACE}/bin:$PATH"
-                    
-                    SNYK_CMD="snyk"
-                    if [ -f ${WORKSPACE}/bin/snyk ]; then
-                        SNYK_CMD="${WORKSPACE}/bin/snyk"
-                    fi
-
+                    # Monitor Python dependencies (even if scan failed earlier)
                     echo "Monitoring dependencies..."
-                    cd ${WORKSPACE}
-                    ${SNYK_CMD} monitor --file=./requirements.txt \
-                        --project-name="vulnerable-python-app-deps-build-${BUILD_NUMBER}" \
-                        --remote-repo-url="https://github.com/eugeneswee/vulnerable-python-app" || true
-
+                    cd $WORKSPACE
+                    snyk monitor --file=./requirements.txt --project-name=vulnerable-python-app-deps-build-$BUILD_NUMBER --remote-repo-url=https://github.com/eugeneswe/vulnerable-python-app || true
+                    
+                    # Monitor container image
                     echo "Monitoring container image..."
-                    ${SNYK_CMD} container monitor ${DOCKER_IMAGE}:${DOCKER_TAG} \
-                        --project-name="vulnerable-python-app-container-build-${BUILD_NUMBER}" || true
-
+                    snyk container monitor $DOCKER_IMAGE:$DOCKER_TAG --project-name=vulnerable-python-app-container-build-$BUILD_NUMBER || true
+                    
+                    # Monitor code (if Snyk Code is enabled)
                     echo "Monitoring code..."
-                    ${SNYK_CMD} code test --report \
-                        --project-name="vulnerable-python-app-code-build-${BUILD_NUMBER}" || true
-
+                    snyk code test --report --project-name=vulnerable-python-app-code-build-$BUILD_NUMBER || true
+                    
                     echo ""
-                    echo "============================================"
-                    echo "Projects should now appear in Snyk dashboard:"
-                    echo "https://app.snyk.io"
-                    echo "============================================"
+                    echo "================================================"
+                    echo "Projects should now appear in Snyk dashboard"
+                    echo "================================================"
                 '''
             }
         }
     }
-
+    
     post {
         always {
+            // Clean up Docker images to save space
             sh '''
                 echo "Cleaning up Docker images..."
-                
-                # Check if Docker is available before cleanup
-                if command -v docker &> /dev/null; then
-                    docker rmi ${DOCKER_IMAGE}:${DOCKER_TAG} || true
-                    docker rmi ${DOCKER_IMAGE}:latest || true
-                else
-                    echo "Docker not available for cleanup"
-                fi
+                docker rmi $DOCKER_IMAGE:$DOCKER_TAG || true
             '''
         }
-
         success {
-            echo 'Pipeline completed successfully!'
+            echo "Pipeline completed successfully!"
         }
-
         unstable {
-            echo 'Pipeline completed with warnings. Security vulnerabilities detected!'
-            echo 'Review the security reports in the archived artifacts.'
+            echo "Pipeline completed with warnings. Security vulnerabilities detected!"
+            echo "Review the security reports in the archived artifacts."
         }
-
         failure {
-            echo 'Pipeline failed. Check the logs for details.'
+            echo "Pipeline failed. Check the logs for details."
         }
     }
 }
