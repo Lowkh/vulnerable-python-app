@@ -32,17 +32,23 @@ pipeline {
                 '''
             }
         }
-      */  
-      stage('Setup Snyk') {
+        */  
+        stage('Setup Snyk') {
             steps {
                 sh '''
                     echo "Installing Snyk CLI..."
                     curl -Lo snyk https://static.snyk.io/cli/latest/snyk-linux
                     chmod +x snyk
-                    mv snyk /usr/local/bin/snyk
+                    
+                    # Option 1: Use local directory instead of system path
+                    mkdir -p ./tools
+                    mv snyk ./tools/snyk
+                    export PATH=$(pwd)/tools:$PATH
+                    snyk --version
                 '''
             }
         }
+
 
         stage('Build Docker Image') {
             steps {
