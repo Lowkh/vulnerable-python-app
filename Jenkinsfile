@@ -1,6 +1,12 @@
 pipeline {
-    agent any
     
+    agent {
+        docker {
+            image 'docker:dind'
+            args '-v /var/run/docker.sock:/var/run/docker.sock'
+        }
+    }
+
     environment {
         SNYK_TOKEN = credentials('snyk-token')
         DOCKER_IMAGE = 'vulnerable-python-app'
